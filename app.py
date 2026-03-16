@@ -19,7 +19,7 @@ from utils.web_search import search_web
 
 
 # -------------------------
-# FILE PROCESSING (PDF / TXT)
+# FILE PROCESSING
 # -------------------------
 
 def process_uploaded_file(uploaded_file):
@@ -29,7 +29,9 @@ def process_uploaded_file(uploaded_file):
         suffix = uploaded_file.name.split(".")[-1]
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=f".{suffix}") as tmp:
+
             tmp.write(uploaded_file.read())
+
             path = tmp.name
 
         if suffix == "pdf":
@@ -40,8 +42,8 @@ def process_uploaded_file(uploaded_file):
         docs = loader.load()
 
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=600,
-            chunk_overlap=80
+            chunk_size=700,
+            chunk_overlap=100
         )
 
         docs = splitter.split_documents(docs)
@@ -55,48 +57,50 @@ def process_uploaded_file(uploaded_file):
     except Exception as e:
 
         st.error(f"File processing failed: {e}")
+
         return None
 
 
 # -------------------------
-# LLM TOOL ROUTER
-# Decide between RAG or WEB
+# TOOL ROUTER (LLM decides)
 # -------------------------
 
 def decide_tool(chat_model, query):
 
-    prompt = """
-You are an AI router.
+    router_prompt = """
+You are a routing assistant.
 
-Your task is to decide which tool should answer the user's question.
+Decide which tool should answer the question.
 
 TOOLS:
 
 RAG
-Use this if the question is about an uploaded document.
+Use if the question is about an uploaded document.
 
 WEB
-Use this if the question requires general knowledge, news, or internet information.
+Use if the question requires general knowledge,
+news, explanations, or internet information.
 
 Respond with ONLY ONE WORD:
+
 RAG or WEB
 """
 
     messages = [
-        SystemMessage(content=prompt),
+        SystemMessage(content=router_prompt),
         HumanMessage(content=query)
     ]
 
     try:
 
-        response = chat_model.invoke(messages).content.strip().upper()
+        response = chat_model.invoke(messages).content.upper()
 
         if "RAG" in response:
             return "rag"
 
         return "web"
 
-    except Exception:
+    except:
 
         return "web"
 
@@ -111,6 +115,10 @@ def get_context(chat_model, query):
 
         tool = decide_tool(chat_model, query)
 
+        # -------------------------
+        # RAG
+        # -------------------------
+
         if tool == "rag" and "vector_store" in st.session_state:
 
             docs = st.session_state.vector_store.similarity_search(query, k=3)
@@ -121,13 +129,15 @@ def get_context(chat_model, query):
 
             return context, sources
 
-        # fallback to web search
+        # -------------------------
+        # WEB SEARCH
+        # -------------------------
 
         context, sources = search_web(query)
 
         return context, sources
 
-    except Exception:
+    except:
 
         return "", []
 
@@ -140,8 +150,25 @@ def get_chat_response(chat_model, query, system_prompt, context):
 
     try:
 
-        messages = [
-            SystemMessage(content=system_prompt),
+        if not context:
+            context = "No external context available."
+
+        messages = [SystemMessage(content=system_prompt)]
+
+        # Add previous conversation (memory)
+        if "messages" in st.session_state:
+
+            history = st.session_state.messages[-6:]   # last 6 messages
+
+            for msg in history:
+
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                else:
+                    messages.append(SystemMessage(content=msg["content"]))
+
+        # Add new query
+        messages.append(
             HumanMessage(
                 content=f"""
 Context:
@@ -150,10 +177,12 @@ Context:
 Question:
 {query}
 
-Answer using ONLY the context above.
+Instructions:
+Use the context if relevant.
+If context is insufficient, answer using your knowledge.
 """
             )
-        ]
+        )
 
         response = chat_model.invoke(messages)
 
@@ -170,11 +199,10 @@ Answer using ONLY the context above.
 
 def chat_page():
 
-    st.title("Intelligent AI Chatbot")
+    st.title("🤖 Intelligent AI Chatbot")
 
     chat_model = get_chatgroq_model()
 
-    # Sidebar settings
     with st.sidebar:
 
         st.header("Settings")
@@ -185,55 +213,56 @@ def chat_page():
         )
 
         if st.button("Clear Chat"):
+
             st.session_state.messages = []
+
             st.rerun()
 
+    # -------------------------
     # PROMPTS
+    # -------------------------
 
     if response_mode == "Concise":
 
         system_prompt = """
-You are an AI research assistant.
+You are a helpful AI assistant.
 
-Rules:
-- Answer using ONLY the provided context.
-- Do not invent facts.
-- If the context lacks information say:
-  "I could not find reliable information in the sources."
-- Keep answers short (3–5 sentences).
+Provide short and clear answers.
 
-End with:
+Prefer factual accuracy.
 
-Sources:
+Use context if provided, but you may also use your own knowledge.
 """
 
     else:
 
         system_prompt = """
-You are an AI research assistant.
+You are an expert AI research assistant.
 
-Rules:
-- Use ONLY the provided context.
-- Do not introduce knowledge outside the context.
-- If context is incomplete say so.
-- Provide a structured explanation.
+Provide detailed explanations.
 
-End with:
+Use context if available, but you may also rely on your knowledge.
 
-Sources:
+Be clear, structured, and helpful.
 """
 
-    # Chat history
+    # -------------------------
+    # CHAT HISTORY
+    # -------------------------
 
     if "messages" not in st.session_state:
+
         st.session_state.messages = []
 
     for msg in st.session_state.messages:
 
         with st.chat_message(msg["role"]):
+
             st.markdown(msg["content"])
 
-    # Chat input
+    # -------------------------
+    # INPUT
+    # -------------------------
 
     if prompt := st.chat_input("Ask anything..."):
 
@@ -242,11 +271,12 @@ Sources:
         )
 
         with st.chat_message("user"):
+
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
 
-            with st.spinner("Searching..."):
+            with st.spinner("Thinking..."):
 
                 context, sources = get_context(chat_model, prompt)
 
@@ -259,7 +289,9 @@ Sources:
 
                 st.markdown(response)
 
-                # SOURCE DISPLAY
+                # -------------------------
+                # SOURCES
+                # -------------------------
 
                 if sources:
 
@@ -268,11 +300,16 @@ Sources:
                         for s in sources:
 
                             if s.startswith("http"):
+
                                 st.markdown(f"- [{s}]({s})")
+
                             else:
+
                                 st.write(f"- {s}")
 
-                # CONTEXT VIEWER
+                # -------------------------
+                # CONTEXT
+                # -------------------------
 
                 with st.expander("Retrieved Context"):
 
@@ -289,10 +326,10 @@ Sources:
 
 def upload_page():
 
-    st.title("Upload Document")
+    st.title("📄 Upload Document")
 
     uploaded_file = st.file_uploader(
-        "Upload TXT or PDF file",
+        "Upload TXT or PDF",
         type=["txt", "pdf"]
     )
 
@@ -323,16 +360,15 @@ def main():
         ["Chat", "Upload File"]
     )
 
-    # reset doc if switching back to chat
-    if page == "Chat" and "vector_store" not in st.session_state:
-        pass
-
     if page == "Chat":
+
         chat_page()
 
-    if page == "Upload File":
+    else:
+
         upload_page()
 
 
 if __name__ == "__main__":
+
     main()
